@@ -1,0 +1,41 @@
+---
+plugin: amazon.aws.aws_ec2
+regions:
+  - us-west-2
+
+filters:
+  tag:Project:
+    - datafusion-clickbench
+  instance-state-name:
+    - running
+
+keyed_groups:
+  - key: tags.Name
+    prefix: instance
+    separator: "_"
+  - key: instance_type
+    prefix: type
+    separator: "_"
+  - key: placement.availability_zone
+    prefix: az
+    separator: "_"
+
+hostnames:
+  - tag:Name
+  - public-ip-address
+
+compose:
+  ansible_host: public_ip_address
+  ansible_user: ubuntu
+  ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+  instance_type: instance_type
+  instance_id: instance_id
+  availability_zone: placement.availability_zone
+  run_id: tags.RunId | default('')
+
+groups:
+  datafusion_instances: "'clickbench-datafusion' in (tags.Name or '')"
+  xlarge_instances: "instance_type == 'c6a.xlarge'"
+  large_instances: "instance_type in ['c6a.2xlarge', 'c6a.4xlarge', 'c8g.4xlarge']"
+  x86_instances: "instance_type.startswith('c6a')"
+  arm_instances: "instance_type.startswith('c8g')"

@@ -1,0 +1,22 @@
+# AWS Configuration for DataFusion ClickBench Runner
+#
+# SETUP PROCESS:
+# 1. Run: ./scripts/setup-environment.sh
+# 2. The script will automatically create the security group and update this config
+# 3. EC2 key pair will be created automatically if it doesn't exist
+
+aws:
+  # AWS region where instances will be launched
+  region: us-west-2
+
+  # EC2 key pair name for SSH access 
+  key_name: ./datafusion-clickbench-key.pem
+
+instances:
+  # Ubuntu 24.04 LTS AMI ID for us-west-2 (latest as of 2025-09-25)
+  ami_id: ami-08a5575b0450a0619
+
+# DataFusion build configuration
+datafusion:
+  repository: https://github.com/apache/arrow-datafusion.git
+  default_ref: main

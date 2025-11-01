@@ -1,0 +1,89 @@
+---
+- name: Simple Teardown using AWS CLI
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+    security_group_name: "datafusion-clickbench-sg"
+    remove_security_group: "{{ remove_security_group | default(false) }}"
+    region: "{{ region | default('us-west-2') }}"
+
+  tasks:
+    - name: Find DataFusion benchmark instances
+      shell: |
+        aws ec2 describe-instances \
+          --region "{{ region }}" \
+          --filters "Name=tag:Project,Values=datafusion-clickbench" \
+                    "Name=instance-state-name,Values=running,pending,stopping" \
+          --query 'Reservations[].Instances[].InstanceId' \
+          --output text
+      register: instance_ids_result
+      changed_when: false
+
+    - name: Parse instance IDs
+      set_fact:
+        instance_ids: "{{ instance_ids_result.stdout.split() | select('match', '^i-') | list }}"
+
+    - name: Display instances to be terminated
+      debug:
+        msg: "Found {{ instance_ids | length }} instance(s) to terminate: {{ instance_ids }}"
+
+    - name: Terminate benchmark instances
+      shell: |
+        aws ec2 terminate-instances \
+          --region "{{ region }}" \
+          --instance-ids {{ instance_ids | join(' ') }}
+      when: instance_ids | length > 0
+
+    - name: Wait for instances to terminate
+      shell: |
+        aws ec2 wait instance-terminated \
+          --region "{{ region }}" \
+          --instance-ids {{ instance_ids | join(' ') }}
+      when: instance_ids | length > 0
+
+    - name: Find security group
+      shell: |
+        aws ec2 describe-security-groups \
+          --region "{{ region }}" \
+          --filters "Name=group-name,Values={{ security_group_name }}" \
+          --query 'SecurityGroups[0].GroupId' \
+          --output text
+      register: security_group_result
+      when: remove_security_group | bool
+      changed_when: false
+
+    - name: Remove security group
+      shell: |
+        aws ec2 delete-security-group \
+          --region "{{ region }}" \
+          --group-id "{{ security_group_result.stdout }}"
+      when:
+        - remove_security_group | bool
+        - security_group_result.stdout != "None"
+        - security_group_result.stdout != ""
+
+    - name: Clean up temporary files
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "/tmp/query.sql"
+      ignore_errors: true
+
+    - name: Summary
+      debug:
+        msg: |
+          🎉 Teardown completed successfully!
+
+          What was removed:
+          ✅ {{ instance_ids | length }} DataFusion benchmark instances terminated
+          {% if remove_security_group | bool and security_group_result.stdout != "None" %}
+          ✅ Security group deleted
+          {% else %}
+          ℹ️  Security group kept (use remove_security_group=true to delete)
+          {% endif %}
+          ✅ Temporary files cleaned
+
+          💰 AWS charges for instances have stopped

@@ -1,0 +1,108 @@
+---
+- name: Setup DataFusion benchmark instances
+  hosts: datafusion_instances
+  become: yes
+  vars:
+    datafusion_ref: "{{ datafusion_ref | default('main') }}"
+    clickbench_repo: "{{ clickbench_repo | default('https://github.com/ClickHouse/ClickBench.git') }}"
+    enable_native_opts: "{{ enable_native_opts | default(true) }}"
+    run_id: "{{ run_id | default('unknown') }}"
+
+  tasks:
+    - name: Update package cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install system dependencies for Homebrew
+      apt:
+        pkg:
+          - build-essential
+          - procps
+          - curl
+          - file
+          - git
+          - wget
+          - jq
+          - htop
+          - tmux
+        state: present
+
+    - name: Install Homebrew on Linux
+      become_user: ubuntu
+      shell: |
+        if ! command -v brew &> /dev/null; then
+          echo "Installing Homebrew..."
+          export NONINTERACTIVE=1
+          /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+
+          # Add brew to PATH
+          echo 'eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"' >> ~/.bashrc
+          eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+        else
+          echo "Homebrew already installed"
+        fi
+      args:
+        creates: /home/linuxbrew/.linuxbrew/bin/brew
+      timeout: 1200
+
+    - name: Create working directory
+      file:
+        path: "/home/ubuntu/datafusion-benchmark-{{ run_id }}"
+        state: directory
+        owner: ubuntu
+        group: ubuntu
+        mode: '0755'
+
+    - name: Clone ClickBench repository
+      git:
+        repo: "{{ clickbench_repo }}"
+        dest: "/home/ubuntu/datafusion-benchmark-{{ run_id }}/ClickBench"
+        version: main
+      become_user: ubuntu
+
+    - name: Install DataFusion CLI via Homebrew
+      shell: |
+        eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+
+        # Install datafusion-cli via brew (much faster - pre-compiled binary)
+        if ! command -v datafusion-cli &> /dev/null; then
+          echo "Installing DataFusion CLI via Homebrew..."
+          {% if datafusion_ref != 'main' %}
+          # For specific versions, we might need to use versioned formulas if available
+          # For now, install the latest stable version
+          brew install datafusion
+          {% else %}
+          brew install datafusion
+          {% endif %}
+        else
+          echo "DataFusion CLI already installed"
+          datafusion-cli --version
+        fi
+      become_user: ubuntu
+      args:
+        chdir: "/home/ubuntu/datafusion-benchmark-{{ run_id }}"
+      register: setup_result
+      timeout: 600  # Should be much faster with pre-compiled binary
+
+    - name: Verify DataFusion installation
+      shell: |
+        eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+        datafusion-cli --version
+      become_user: ubuntu
+      register: version_check
+
+    - name: Log setup completion
+      debug:
+        msg: |
+          DataFusion setup complete on {{ inventory_hostname }}:
+          Instance Type: {{ instance_type }}
+          DataFusion Version: {{ version_check.stdout }}
+          Run ID: {{ run_id }}
+
+    - name: Create benchmark ready marker
+      file:
+        path: "/tmp/benchmark-ready-{{ run_id }}"
+        state: touch
+        owner: ubuntu
+        group: ubuntu

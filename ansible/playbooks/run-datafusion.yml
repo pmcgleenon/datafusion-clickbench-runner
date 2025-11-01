@@ -1,0 +1,195 @@
+---
+- name: Run DataFusion ClickBench
+  hosts: datafusion_instances
+  become: yes
+  vars:
+    datafusion_variant: "{{ datafusion_variant | default('datafusion') }}"
+    datafusion_ref: "{{ datafusion_ref | default('main') }}"
+    run_id: "{{ run_id | default('unknown') }}"
+
+  tasks:
+    - name: Wait for benchmark ready marker
+      wait_for:
+        path: "/tmp/benchmark-ready-{{ run_id }}"
+        timeout: 300
+      when: false  # Skip this check for existing instances
+
+    - name: Find existing benchmark directory
+      find:
+        paths: "/home/ubuntu"
+        patterns: "datafusion-benchmark-*"
+        file_type: directory
+      register: existing_dirs
+
+    - name: Set working directory paths
+      set_fact:
+        work_dir: "{{ existing_dirs.files[0].path if existing_dirs.files else '/home/ubuntu/datafusion-benchmark-' + run_id }}"
+        benchmark_dir: "{{ (existing_dirs.files[0].path if existing_dirs.files else '/home/ubuntu/datafusion-benchmark-' + run_id) }}/ClickBench/{{ datafusion_variant }}"
+        results_dir: "/home/ubuntu/results/{{ datafusion_variant }}"
+        results_file: "/home/ubuntu/results/{{ datafusion_variant }}/{{ instance_type }}.json"
+
+    - name: Check if benchmark directory exists
+      stat:
+        path: "{{ benchmark_dir }}"
+      register: benchmark_dir_stat
+
+    - name: Fail if benchmark directory missing
+      fail:
+        msg: "Benchmark directory {{ benchmark_dir }} not found"
+      when: not benchmark_dir_stat.stat.exists
+
+    - name: Check DataFusion CLI version
+      shell: |
+        eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+        datafusion-cli --version
+      register: datafusion_version
+      become_user: ubuntu
+
+    - name: Display DataFusion CLI version
+      debug:
+        msg: "Using DataFusion CLI: {{ datafusion_version.stdout }}"
+
+    - name: Download ClickBench dataset
+      get_url:
+        url: "https://datasets.clickhouse.com/hits_compatible/hits.parquet"
+        dest: "{{ benchmark_dir }}/hits.parquet"
+        owner: ubuntu
+        group: ubuntu
+        timeout: 300
+      when: datafusion_variant == "datafusion"
+
+    - name: Download partitioned ClickBench dataset
+      shell: |
+        mkdir -p partitioned
+        for i in {0..99}; do
+          wget -q "https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_${i}.parquet" \
+               -O "partitioned/hits_${i}.parquet" &
+        done
+        wait
+      args:
+        executable: /bin/bash
+        chdir: "{{ benchmark_dir }}"
+      become_user: ubuntu
+      when: datafusion_variant == "datafusion-partitioned"
+
+    - name: Create results directory
+      file:
+        path: "{{ results_dir }}"
+        state: directory
+        owner: ubuntu
+        group: ubuntu
+
+    - name: Run benchmark using ClickBench run.sh
+      shell: |
+        eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+        export PATH="/home/linuxbrew/.linuxbrew/bin:$HOME/.cargo/bin:$PATH"
+
+        # Use the official ClickBench run.sh script
+        # Capture both stdout and stderr to get full context
+        ./run.sh "{{ instance_type }}" > "{{ results_file }}.raw" 2>&1
+        exit_code=$?
+
+        # Save the exit code and full output for debugging
+        cp "{{ results_file }}.raw" "{{ results_file }}.full_output"
+        echo "Exit code: $exit_code" >> "{{ results_file }}.full_output"
+
+        # If there were errors, exit with the original exit code
+        exit $exit_code
+      args:
+        executable: /bin/bash
+        chdir: "{{ benchmark_dir }}"
+      become_user: ubuntu
+      register: benchmark_result
+      timeout: 3600  # 1 hour timeout
+
+    - name: Display benchmark output
+      debug:
+        msg: |
+          Benchmark execution completed for {{ datafusion_variant }}:
+          Return code: {{ benchmark_result.rc }}
+          Stdout: {{ benchmark_result.stdout }}
+          Stderr: {{ benchmark_result.stderr }}
+
+    - name: Check for benchmark errors and validate results
+      shell: |
+        # Check if benchmark failed with non-zero exit code
+        if [ "{{ benchmark_result.rc }}" != "0" ]; then
+          echo "Benchmark failed with exit code {{ benchmark_result.rc }}"
+          echo "Full output:"
+          cat "{{ results_file }}.full_output"
+          exit 1
+        fi
+
+        # Check if raw results file is empty
+        if [ ! -s "{{ results_file }}.raw" ]; then
+          echo "No benchmark results generated"
+          cat "{{ results_file }}.full_output"
+          exit 1
+        fi
+
+        # Check if results contain mostly nulls (indicating query failures)
+        null_count=$(grep -o "null" "{{ results_file }}.raw" | wc -l || echo 0)
+        bracket_count=$(grep -o "\[" "{{ results_file }}.raw" | wc -l || echo 0)
+
+        if [ "$bracket_count" -eq 0 ]; then
+          echo "No valid result arrays found in output"
+          echo "Raw output:"
+          cat "{{ results_file }}.raw"
+          exit 1
+        fi
+
+        if [ "$null_count" -gt "$((bracket_count * 2))" ]; then
+          echo "Too many null results: $null_count nulls out of $bracket_count result arrays"
+          echo "This indicates most queries failed. Full output:"
+          cat "{{ results_file }}.full_output"
+          exit 1
+        fi
+
+        echo "Benchmark validation passed: $bracket_count result arrays with $null_count null values"
+      args:
+        executable: /bin/bash
+        chdir: "{{ benchmark_dir }}"
+      become_user: ubuntu
+
+    - name: Convert results to JSON format
+      shell: |
+        # Create JSON from run.sh output
+        # Clean up the raw output: remove first line (instance type), ensure commas between arrays, remove final comma
+        tail -n +2 "{{ results_file }}.raw" | sed 's/]$/],/' | sed '$s/,$//' > "{{ results_file }}.clean"
+
+        cat > "{{ results_file }}" << EOF
+        {
+            "system": "$(if [ "{{ datafusion_variant }}" = "datafusion-partitioned" ]; then echo "DataFusion (Parquet, partitioned)"; else echo "DataFusion (Parquet, single)"; fi)",
+            "date": "$(date +%Y-%m-%d)",
+            "machine": "{{ instance_type }}",
+            "cluster_size": 1,
+            "proprietary": "no",
+            "tuned": "no",
+            "tags": ["Rust","column-oriented","embedded","stateless"],
+            "load_time": 0,
+            "data_size": $(if [ "{{ datafusion_variant }}" = "datafusion-partitioned" ]; then du -b partitioned/*.parquet 2>/dev/null | awk '{sum+=$1} END {print sum}' || echo 0; else stat -c%s hits.parquet 2>/dev/null || echo 0; fi),
+            "result": [
+        $(cat "{{ results_file }}.clean")
+            ]
+        }
+        EOF
+      args:
+        chdir: "{{ benchmark_dir }}"
+      become_user: ubuntu
+
+    - name: Verify results file
+      stat:
+        path: "{{ results_file }}"
+      register: results_stat
+
+    - name: Validate results JSON
+      shell: jq empty "{{ results_file }}"
+      become_user: ubuntu
+      when: results_stat.stat.exists
+
+    - name: Display benchmark summary
+      debug:
+        msg: |
+          Benchmark completed for {{ datafusion_variant }} on {{ instance_type }}:
+          Results file: {{ results_file }}
+          File size: {{ results_stat.stat.size if results_stat.stat.exists else 'N/A' }} bytes

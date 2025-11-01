@@ -1,0 +1,82 @@
+---
+- name: Collect benchmark results from instances
+  hosts: datafusion_instances
+  gather_facts: true
+  vars:
+    local_results_dir: "{{ local_results_dir }}"
+    run_id: "{{ run_id | default('unknown') }}"
+
+  tasks:
+    - name: Create local results directory structure
+      local_action:
+        module: file
+        path: "{{ local_results_dir }}/{{ item }}"
+        state: directory
+      loop:
+        - "datafusion"
+        - "datafusion-partitioned"
+        - "raw"
+      run_once: true
+
+    - name: Find result files on instances
+      find:
+        paths: "/home/ubuntu/results"
+        patterns: "*.json"
+        file_type: file
+        recurse: yes
+      register: result_files
+
+    - name: Find debug files on instances
+      find:
+        paths: "/home/ubuntu/results"
+        patterns: "*.raw,*.full_output,*.error,*.clean"
+        file_type: file
+        recurse: yes
+      register: debug_files
+
+    - name: Fetch benchmark results with proper structure
+      fetch:
+        src: "{{ item.path }}"
+        dest: "{{ local_results_dir }}/{{ item.path | regex_replace('/home/ubuntu/results/', '') }}"
+        flat: yes
+      loop: "{{ result_files.files }}"
+      when: result_files.files | length > 0
+
+    - name: Fetch debug files for troubleshooting
+      fetch:
+        src: "{{ item.path }}"
+        dest: "{{ local_results_dir }}/raw/{{ item.path | regex_replace('/home/ubuntu/results/', '') | regex_replace('/', '_') }}"
+        flat: yes
+      loop: "{{ debug_files.files }}"
+      when: debug_files.files | length > 0
+
+    - name: Fetch detailed logs (if they exist)
+      fetch:
+        src: "/home/ubuntu/benchmark.log"
+        dest: "{{ local_results_dir }}/raw/{{ inventory_hostname }}_benchmark.log"
+        flat: yes
+      ignore_errors: true
+      when: false  # Skip this task as benchmark.log is not created
+
+    - name: Create submission guide
+      local_action:
+        module: copy
+        content: |
+          # DataFusion ClickBench Results Submission Guide
+
+          Generated: {{ ansible_date_time.iso8601 }}
+          Run ID: {{ run_id }}
+
+          ## Results Ready for Submission
+
+          The benchmark results are formatted and ready for submission to the ClickBench repository.
+
+          ## Next Steps
+
+          1. Fork the ClickBench repository
+          2. Copy the JSON files to the appropriate directories
+          3. Create a pull request with your results
+
+          For more details, see: https://github.com/ClickHouse/ClickBench
+        dest: "{{ local_results_dir }}/SUBMISSION_GUIDE.md"
+      run_once: true

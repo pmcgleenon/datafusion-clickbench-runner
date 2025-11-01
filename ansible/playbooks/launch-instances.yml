@@ -1,0 +1,62 @@
+---
+- name: Launch DataFusion benchmark instances
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+    security_group_name: "datafusion-clickbench-sg"
+    security_group_description: "Security group for DataFusion ClickBench automation - SSH access only"
+    instance_types: "{{ instance_types | default(['c6a.2xlarge']) }}"
+    ami_id: "{{ ami_id | default('ami-08a5575b0450a0619') }}"
+    key_name: "{{ key_name }}"
+    region: "{{ region | default('us-west-2') }}"
+    run_id: "{{ run_id | default('unknown') }}"
+
+  tasks:
+    - name: Include security group setup tasks
+      include_tasks: ../tasks/setup-security-group.yml
+
+    - name: Launch EC2 instances
+      ec2:
+        name: "clickbench-datafusion-{{ item }}"
+        image_id: "{{ ami_id }}"
+        instance_type: "{{ item }}"
+        key_name: "{{ key_name }}"
+        security_groups:
+          - "{{ security_group_name }}"
+        wait: true
+        wait_timeout: 300
+        state: present
+        tags:
+          Name: "clickbench-datafusion-{{ item }}"
+          Project: "datafusion-clickbench"
+          AutoTerminate: "true"
+          RunId: "{{ run_id }}"
+          InstanceType: "{{ item }}"
+        # Use spot pricing if configured
+        instance_market_options: >-
+          {%- if spot_prices is defined and item in spot_prices -%}
+          {
+            "MarketType": "spot",
+            "SpotOptions": {
+              "MaxPrice": "{{ spot_prices[item] }}",
+              "SpotInstanceType": "one-time"
+            }
+          }
+          {%- endif -%}
+      loop: "{{ instance_types }}"
+      register: launched_instances
+
+    - name: Display launched instances
+      debug:
+        msg: "Launched {{ item.instances[0].instance_type }} instance {{ item.instances[0].instance_id }} at {{ item.instances[0].public_ip_address }}"
+      loop: "{{ launched_instances.results }}"
+
+    - name: Wait for instances to be reachable via SSH
+      wait_for:
+        host: "{{ item.instances[0].public_ip_address }}"
+        port: 22
+        timeout: 300
+        delay: 10
+      loop: "{{ launched_instances.results }}"

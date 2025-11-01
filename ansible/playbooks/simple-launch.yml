@@ -1,0 +1,176 @@
+---
+- name: Simple Launch using AWS CLI
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+    security_group_name: "datafusion-clickbench-sg"
+    instance_types: "{{ instance_types | default(['c6a.2xlarge']) }}"
+    ami_id: "{{ ami_id | default('ami-08a5575b0450a0619') }}"
+    key_name: "{{ key_name }}"
+    region: "{{ region | default('us-west-2') }}"
+    run_id: "{{ run_id | default('unknown') }}"
+
+  tasks:
+    - name: Parse instance_types as JSON
+      set_fact:
+        instance_types_list: "{{ instance_types | from_json }}"
+
+    - name: Get current public IP
+      uri:
+        url: https://api.ipify.org
+        return_content: yes
+      register: public_ip_result
+
+    - name: Set current IP variable
+      set_fact:
+        current_ip: "{{ public_ip_result.content.strip() }}"
+
+    - name: Display detected IP
+      debug:
+        msg: "Detected public IP: {{ current_ip }}"
+
+    - name: Check if SSH key pair exists
+      shell: |
+        aws ec2 describe-key-pairs \
+          --region "{{ region }}" \
+          --key-names "{{ key_name }}" \
+          --query 'KeyPairs[0].KeyName' \
+          --output text
+      register: existing_key_result
+      changed_when: false
+      failed_when: false
+
+    - name: Create SSH key pair if it doesn't exist
+      shell: |
+        aws ec2 create-key-pair \
+          --region "{{ region }}" \
+          --key-name "{{ key_name }}" \
+          --key-type ed25519 \
+          --key-format pem \
+          --query 'KeyMaterial' \
+          --output text > "{{ playbook_dir }}/../../{{ key_name }}.pem"
+        chmod 600 "{{ playbook_dir }}/../../{{ key_name }}.pem"
+        echo "Created new SSH key pair: {{ key_name }}.pem"
+      when: existing_key_result.stdout == "None" or existing_key_result.stdout == ""
+      register: new_key_result
+
+    - name: Display SSH key status
+      debug:
+        msg: "{{ 'Using existing SSH key pair: ' + key_name if (existing_key_result.stdout != 'None' and existing_key_result.stdout != '') else 'Created new SSH key pair: ' + key_name + '.pem' }}"
+
+    - name: Get default VPC
+      shell: |
+        aws ec2 describe-vpcs \
+          --region "{{ region }}" \
+          --filters "Name=isDefault,Values=true" \
+          --query 'Vpcs[0].VpcId' \
+          --output text
+      register: vpc_result
+      changed_when: false
+
+    - name: Check if security group exists
+      shell: |
+        aws ec2 describe-security-groups \
+          --region "{{ region }}" \
+          --filters "Name=group-name,Values={{ security_group_name }}" \
+          --query 'SecurityGroups[0].GroupId' \
+          --output text
+      register: existing_sg_result
+      changed_when: false
+      failed_when: false
+
+    - name: Create security group if it doesn't exist
+      shell: |
+        aws ec2 create-security-group \
+          --region "{{ region }}" \
+          --group-name "{{ security_group_name }}" \
+          --description "Security group for DataFusion ClickBench automation - SSH access only" \
+          --vpc-id "{{ vpc_result.stdout }}" \
+          --query 'GroupId' \
+          --output text
+      register: new_sg_result
+      when: existing_sg_result.stdout == "None" or existing_sg_result.stdout == ""
+
+    - name: Set security group ID
+      set_fact:
+        security_group_id: "{{ new_sg_result.stdout if (existing_sg_result.stdout == 'None' or existing_sg_result.stdout == '') else existing_sg_result.stdout }}"
+
+    - name: Add SSH rule to security group
+      shell: |
+        aws ec2 authorize-security-group-ingress \
+          --region "{{ region }}" \
+          --group-id "{{ security_group_id }}" \
+          --protocol tcp \
+          --port 22 \
+          --cidr "{{ current_ip }}/32"
+      ignore_errors: true  # Rule might already exist
+
+    - name: Get instance architecture for each instance type
+      shell: |
+        aws ec2 describe-instance-types \
+          --region "{{ region }}" \
+          --instance-types "{{ item }}" \
+          --query 'InstanceTypes[0].ProcessorInfo.SupportedArchitectures[0]' \
+          --output text
+      loop: "{{ instance_types_list }}"
+      register: instance_architectures
+
+    - name: Set AMI mapping based on architecture
+      set_fact:
+        ami_mapping:
+          x86_64: "ami-08a5575b0450a0619"  # Ubuntu 24.04 x86_64
+          arm64: "ami-057f91e02852c994a"   # Ubuntu 24.04 ARM64
+
+    - name: Launch EC2 instances
+      shell: |
+        arch="{{ instance_architectures.results[ansible_loop.index0].stdout }}"
+        ami_id="{{ ami_mapping[instance_architectures.results[ansible_loop.index0].stdout] }}"
+        aws ec2 run-instances \
+          --region "{{ region }}" \
+          --image-id "$ami_id" \
+          --instance-type "{{ item }}" \
+          --key-name "{{ key_name }}" \
+          --security-group-ids "{{ security_group_id }}" \
+          --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":500,"VolumeType":"gp3","DeleteOnTermination":true}}]' \
+          --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=clickbench-datafusion-{{ item }}},{Key=Project,Value=datafusion-clickbench},{Key=AutoTerminate,Value=true},{Key=RunId,Value={{ run_id }}},{Key=InstanceType,Value={{ item }}},{Key=Architecture,Value='$arch'}]' \
+          --query 'Instances[0].InstanceId' \
+          --output text
+      loop: "{{ instance_types_list }}"
+      loop_control:
+        extended: true
+      register: launched_instances
+
+    - name: Display launched instances
+      debug:
+        msg: "Launched {{ item.item }} instance {{ item.stdout }}"
+      loop: "{{ launched_instances.results }}"
+
+    - name: Wait for instances to be running
+      shell: |
+        aws ec2 wait instance-running \
+          --region "{{ region }}" \
+          --instance-ids {{ launched_instances.results | map(attribute='stdout') | join(' ') }}
+
+    - name: Get instance public IPs
+      shell: |
+        aws ec2 describe-instances \
+          --region "{{ region }}" \
+          --instance-ids {{ launched_instances.results | map(attribute='stdout') | join(' ') }} \
+          --query 'Reservations[].Instances[].[InstanceId,PublicIpAddress]' \
+          --output text
+      register: instance_ips
+
+    - name: Display instance information
+      debug:
+        msg: "Instance {{ item.split()[0] }} is ready at {{ item.split()[1] }}"
+      loop: "{{ instance_ips.stdout_lines }}"
+
+    - name: Wait for SSH to be ready
+      wait_for:
+        host: "{{ item.split()[1] }}"
+        port: 22
+        timeout: 300
+        delay: 10
+      loop: "{{ instance_ips.stdout_lines }}"

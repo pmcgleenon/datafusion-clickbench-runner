@@ -1,0 +1,75 @@
+---
+- name: Teardown DataFusion ClickBench Environment
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+    security_group_name: "datafusion-clickbench-sg"
+    remove_security_group: "{{ remove_security_group | default(false) }}"
+    region: "{{ region | default('us-west-2') }}"
+
+  tasks:
+    - name: Find DataFusion benchmark instances
+      ec2_instance_info:
+        filters:
+          "tag:Project": "datafusion-clickbench"
+          instance-state-name: ["running", "pending", "stopping"]
+      register: benchmark_instances
+
+    - name: Display instances to be terminated
+      debug:
+        msg: "Found {{ benchmark_instances.instances | length }} instance(s) to terminate"
+
+    - name: Show instance details
+      debug:
+        msg: "{{ item.instance_id }} ({{ item.instance_type }}) - {{ item.state.name }} - {{ item.tags.Name | default('unnamed') }}"
+      loop: "{{ benchmark_instances.instances }}"
+      when: benchmark_instances.instances | length > 0
+
+    - name: Terminate benchmark instances
+      ec2:
+        instance_ids: "{{ benchmark_instances.instances | map(attribute='instance_id') | list }}"
+        state: absent
+        wait: true
+        wait_timeout: 300
+      when: benchmark_instances.instances | length > 0
+
+    - name: Find security group
+      ec2_group_info:
+        filters:
+          group-name: "{{ security_group_name }}"
+      register: security_groups
+      when: remove_security_group | bool
+
+    - name: Remove security group
+      ec2_group:
+        name: "{{ security_group_name }}"
+        state: absent
+      when:
+        - remove_security_group | bool
+        - security_groups.security_groups | length > 0
+
+    - name: Clean up temporary files
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "/tmp/query.sql"
+      ignore_errors: true
+
+    - name: Summary
+      debug:
+        msg: |
+          🎉 Teardown completed successfully!
+
+          What was removed:
+          ✅ {{ benchmark_instances.instances | length }} DataFusion benchmark instances terminated
+          {% if remove_security_group | bool and security_groups.security_groups | length > 0 %}
+          ✅ Security group deleted
+          {% else %}
+          ℹ️  Security group kept (use remove_security_group=true to delete)
+          {% endif %}
+          ✅ Temporary files cleaned
+
+          💰 AWS charges for instances have stopped

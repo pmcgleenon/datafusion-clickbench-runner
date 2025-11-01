@@ -1,0 +1,74 @@
+---
+# Security Group Setup Tasks
+- name: Get current public IP
+  uri:
+    url: https://api.ipify.org
+    return_content: yes
+  register: public_ip_result
+
+- name: Set current IP variable
+  set_fact:
+    current_ip: "{{ public_ip_result.content.strip() }}"
+
+- name: Display detected IP
+  debug:
+    msg: "Detected public IP: {{ current_ip }}"
+
+- name: Get default VPC info
+  ec2_vpc_info:
+    filters:
+      isDefault: true
+  register: vpc_info
+
+- name: Set VPC ID
+  set_fact:
+    vpc_id: "{{ vpc_info.vpcs[0].vpc_id }}"
+
+- name: Create or update security group
+  ec2_group:
+    name: "{{ security_group_name }}"
+    description: "{{ security_group_description }}"
+    vpc_id: "{{ vpc_id }}"
+    rules:
+      - proto: tcp
+        ports:
+          - 22
+        cidr_ip: "{{ current_ip }}/32"
+        rule_desc: "SSH access from current IP"
+    rules_egress:
+      - proto: all
+        cidr_ip: "0.0.0.0/0"
+        rule_desc: "All outbound traffic"
+    tags:
+      Name: "{{ security_group_name }}"
+      Project: "datafusion-clickbench"
+      Purpose: "SSH access for ClickBench automation"
+    state: present
+    purge_rules: true
+    purge_rules_egress: false
+  register: security_group
+  retries: 3
+  delay: 5
+
+- name: Verify security group exists and is ready
+  ec2_group_info:
+    group_ids:
+      - "{{ security_group.group_id }}"
+  register: sg_verification
+  retries: 5
+  delay: 2
+  until: sg_verification.security_groups | length > 0
+
+- name: Wait for security group to be fully propagated
+  pause:
+    seconds: 5
+  when: security_group.changed
+
+- name: Display security group info
+  debug:
+    msg: "Security group {{ security_group_name }} ({{ security_group.group_id }}) ready"
+
+- name: Set security group fact for other playbooks
+  set_fact:
+    datafusion_security_group_id: "{{ security_group.group_id }}"
+    datafusion_security_group_name: "{{ security_group_name }}"

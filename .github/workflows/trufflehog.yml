@@ -21,7 +21,7 @@ jobs:
         with:
           fetch-depth: 0
 
-       - name: TruffleHog - Secrets Scan
+      - name: TruffleHog - Secrets Scan
          id: trufflehog
          if: always()
          uses: trufflesecurity/trufflehog@v3.90.12 

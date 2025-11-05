@@ -5,6 +5,7 @@
   vars:
     datafusion_variant: "{{ datafusion_variant | default('datafusion') }}"
     datafusion_ref: "{{ datafusion_ref | default('main') }}"
+    datafusion_install_method: "{{ datafusion_install_method | default('compile') }}"
     run_id: "{{ run_id | default('unknown') }}"
 
   tasks:
@@ -44,10 +45,12 @@
         datafusion-cli --version
       register: datafusion_version
       become_user: ubuntu
+      when: datafusion_install_method == "brew"
 
     - name: Display DataFusion CLI version
       debug:
         msg: "Using DataFusion CLI: {{ datafusion_version.stdout }}"
+      when: datafusion_install_method == "brew"
 
     - name: Download ClickBench dataset
       get_url:
@@ -79,7 +82,7 @@
         owner: ubuntu
         group: ubuntu
 
-    - name: Run benchmark using ClickBench run.sh
+    - name: Run benchmark using ClickBench run.sh (Homebrew installation)
       shell: |
         eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
         export PATH="/home/linuxbrew/.linuxbrew/bin:$HOME/.cargo/bin:$PATH"
@@ -101,6 +104,30 @@
       become_user: ubuntu
       register: benchmark_result
       timeout: 3600  # 1 hour timeout
+      when: datafusion_install_method == "brew"
+
+    - name: Run benchmark using ClickBench benchmark.sh (compilation method)
+      shell: |
+        export PATH="/usr/local/bin:$HOME/.cargo/bin:$PATH"
+
+        # Use the official ClickBench benchmark.sh script which handles compilation and testing
+        # Capture both stdout and stderr to get full context
+        bash benchmark.sh > "{{ results_file }}.raw" 2>&1
+        exit_code=$?
+
+        # Save the exit code and full output for debugging
+        cp "{{ results_file }}.raw" "{{ results_file }}.full_output"
+        echo "Exit code: $exit_code" >> "{{ results_file }}.full_output"
+
+        # If there were errors, exit with the original exit code
+        exit $exit_code
+      args:
+        executable: /bin/bash
+        chdir: "{{ benchmark_dir }}"
+      become_user: ubuntu
+      register: benchmark_result
+      timeout: 7200  # 2 hour timeout for compilation + benchmark
+      when: datafusion_install_method == "compile"
 
     - name: Display benchmark output
       debug:
@@ -153,26 +180,43 @@
 
     - name: Convert results to JSON format
       shell: |
-        # Create JSON from run.sh output
-        # Clean up the raw output: remove first line (instance type), ensure commas between arrays, remove final comma
-        tail -n +2 "{{ results_file }}.raw" | sed 's/]$/],/' | sed '$s/,$//' > "{{ results_file }}.clean"
+        # Create JSON from benchmark.sh output
+        # Extract only the benchmark result arrays (lines starting with [ and ending with ],)
+        # and ignore all the installation/compilation output
+        grep '^\[.*\],$\|^\[.*\]$' "{{ results_file }}.raw" | sed 's/]$/],/' | sed '$s/,$//' > "{{ results_file }}.clean"
 
-        cat > "{{ results_file }}" << EOF
+        # Calculate data size safely
+        if [ "{{ datafusion_variant }}" = "datafusion-partitioned" ]; then
+          data_size=$(du -b partitioned/*.parquet 2>/dev/null | awk '{sum+=$1} END {print sum}' 2>/dev/null || echo 0)
+        else
+          data_size=$(stat -c%s hits.parquet 2>/dev/null || echo 0)
+        fi
+
+        # Ensure data_size is a valid number
+        if ! [[ "$data_size" =~ ^[0-9]+$ ]]; then
+          data_size=0
+        fi
+
+        # Create JSON with proper substitution
+        system_name="$(if [ "{{ datafusion_variant }}" = "datafusion-partitioned" ]; then echo "DataFusion (Parquet, partitioned)"; else echo "DataFusion (Parquet, single)"; fi)"
+        date_str="$(date +%Y-%m-%d)"
+
         {
-            "system": "$(if [ "{{ datafusion_variant }}" = "datafusion-partitioned" ]; then echo "DataFusion (Parquet, partitioned)"; else echo "DataFusion (Parquet, single)"; fi)",
-            "date": "$(date +%Y-%m-%d)",
-            "machine": "{{ instance_type }}",
-            "cluster_size": 1,
-            "proprietary": "no",
-            "tuned": "no",
-            "tags": ["Rust","column-oriented","embedded","stateless"],
-            "load_time": 0,
-            "data_size": $(if [ "{{ datafusion_variant }}" = "datafusion-partitioned" ]; then du -b partitioned/*.parquet 2>/dev/null | awk '{sum+=$1} END {print sum}' || echo 0; else stat -c%s hits.parquet 2>/dev/null || echo 0; fi),
-            "result": [
-        $(cat "{{ results_file }}.clean")
-            ]
-        }
-        EOF
+            echo "{"
+            echo "    \"system\": \"$system_name\","
+            echo "    \"date\": \"$date_str\","
+            echo "    \"machine\": \"{{ instance_type }}\","
+            echo "    \"cluster_size\": 1,"
+            echo "    \"proprietary\": \"no\","
+            echo "    \"tuned\": \"no\","
+            echo "    \"tags\": [\"Rust\",\"column-oriented\",\"embedded\",\"stateless\"],"
+            echo "    \"load_time\": 0,"
+            echo "    \"data_size\": $data_size,"
+            echo "    \"result\": ["
+            cat "{{ results_file }}.clean"
+            echo "    ]"
+            echo "}"
+        } > "{{ results_file }}"
       args:
         chdir: "{{ benchmark_dir }}"
       become_user: ubuntu

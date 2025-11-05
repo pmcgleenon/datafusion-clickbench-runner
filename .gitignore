@@ -51,7 +51,7 @@ config/aws-config.yml
 config/tracked-releases.yml
 
 # Results and logs
-results/*/
+results/
 !results/.gitkeep
 *.log
 *.tmp

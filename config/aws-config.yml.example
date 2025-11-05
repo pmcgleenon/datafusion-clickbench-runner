@@ -20,3 +20,12 @@ instances:
 datafusion:
   repository: https://github.com/apache/arrow-datafusion.git
   default_ref: main
+  # Installation method: "brew" or "compile"
+  # brew: Install pre-compiled binary via Homebrew 
+  # compile: Compile from source on the instance (recommended.  allows custom refs/forks)
+  install_method: compile
+
+# ClickBench repository configuration
+clickbench:
+  repository: https://github.com/ClickHouse/ClickBench.git
+  default_ref: main

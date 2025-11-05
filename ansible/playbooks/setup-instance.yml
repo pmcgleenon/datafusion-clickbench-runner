@@ -4,7 +4,9 @@
   become: yes
   vars:
     datafusion_ref: "{{ datafusion_ref | default('main') }}"
+    datafusion_install_method: "{{ datafusion_install_method | default('compile') }}"
     clickbench_repo: "{{ clickbench_repo | default('https://github.com/ClickHouse/ClickBench.git') }}"
+    clickbench_ref: "{{ clickbench_ref | default('main') }}"
     enable_native_opts: "{{ enable_native_opts | default(true) }}"
     run_id: "{{ run_id | default('unknown') }}"
 
@@ -14,7 +16,7 @@
         update_cache: yes
         cache_valid_time: 3600
 
-    - name: Install system dependencies for Homebrew
+    - name: Install system dependencies
       apt:
         pkg:
           - build-essential
@@ -26,6 +28,9 @@
           - jq
           - htop
           - tmux
+          - pkg-config
+          - libssl-dev
+          - protobuf-compiler
         state: present
 
     - name: Install Homebrew on Linux
@@ -45,6 +50,24 @@
       args:
         creates: /home/linuxbrew/.linuxbrew/bin/brew
       timeout: 1200
+      when: datafusion_install_method == "brew"
+
+    - name: Install Rust
+      become_user: ubuntu
+      shell: |
+        if ! command -v rustc &> /dev/null; then
+          echo "Installing Rust..."
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          source ~/.cargo/env
+          echo 'source ~/.cargo/env' >> ~/.bashrc
+        else
+          echo "Rust already installed"
+          rustc --version
+        fi
+      args:
+        creates: /home/ubuntu/.cargo/bin/rustc
+      timeout: 600
+      when: datafusion_install_method == "compile"
 
     - name: Create working directory
       file:
@@ -58,7 +81,7 @@
       git:
         repo: "{{ clickbench_repo }}"
         dest: "/home/ubuntu/datafusion-benchmark-{{ run_id }}/ClickBench"
-        version: main
+        version: "{{ clickbench_ref }}"
       become_user: ubuntu
 
     - name: Install DataFusion CLI via Homebrew
@@ -84,6 +107,19 @@
         chdir: "/home/ubuntu/datafusion-benchmark-{{ run_id }}"
       register: setup_result
       timeout: 600  # Should be much faster with pre-compiled binary
+      when: datafusion_install_method == "brew"
+
+    - name: Run DataFusion benchmark.sh script (handles compilation and setup)
+      shell: |
+        echo "Running benchmark.sh script to handle DataFusion compilation and setup..."
+        # The benchmark.sh script will handle Rust installation, compilation, and PATH setup
+        bash benchmark.sh
+      become_user: ubuntu
+      args:
+        chdir: "/home/ubuntu/datafusion-benchmark-{{ run_id }}/ClickBench/datafusion"
+      register: datafusion_setup_result
+      timeout: 3600  # Compilation can take a while
+      when: datafusion_install_method == "compile"
 
     - name: Verify DataFusion installation
       shell: |
@@ -91,13 +127,15 @@
         datafusion-cli --version
       become_user: ubuntu
       register: version_check
+      when: datafusion_install_method == "brew"
 
     - name: Log setup completion
       debug:
         msg: |
           DataFusion setup complete on {{ inventory_hostname }}:
           Instance Type: {{ instance_type }}
-          DataFusion Version: {{ version_check.stdout }}
+          DataFusion Install Method: {{ datafusion_install_method }}
+          DataFusion Version: {{ version_check.stdout | default('Will be compiled during benchmark execution') }}
           Run ID: {{ run_id }}
 
     - name: Create benchmark ready marker

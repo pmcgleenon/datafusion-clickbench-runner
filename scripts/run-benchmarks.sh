@@ -6,8 +6,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
-# Configuration
-CLICKBENCH_REPO="https://github.com/ClickHouse/ClickBench.git"
+# Configuration (will be loaded from config file)
 #INSTANCE_TYPES=("c6a.xlarge" "c6a.2xlarge" "c6a.4xlarge" "c8g.4xlarge")
 INSTANCE_TYPES=("c6a.2xlarge" "c6a.4xlarge" "c8g.4xlarge")
 DATAFUSION_VARIANTS=("datafusion" "datafusion-partitioned")
@@ -29,6 +28,9 @@ Options:
     --variants      Comma-separated list of variants (default: datafusion,datafusion-partitioned)
     --instances     Comma-separated list of instance types (default: all)
     --datafusion-ref Git reference for DataFusion (default: main)
+    --datafusion-install-method Installation method: brew or compile (default: from config)
+    --clickbench-repo Repository URL for ClickBench (default: from config)
+    --clickbench-ref Git reference for ClickBench (default: main)
     --enable-native-opts Enable native CPU optimizations (default: true)
     --run-id        Unique identifier for this run (default: auto-generated)
     --dry-run       Show what would be done without executing
@@ -38,6 +40,9 @@ Examples:
     $0 --variants datafusion benchmark        # Run only standard datafusion variant
     $0 --instances c6a.4xlarge,c8g.4xlarge benchmark   # Run on specific instances
     $0 --datafusion-ref v49.0.0 full         # Benchmark specific DataFusion version
+    $0 --clickbench-repo https://github.com/pmcgleenon/ClickBench/ --clickbench-ref action-check-env full  # Use fork and branch
+    $0 --datafusion-install-method brew full     # Use Homebrew for faster setup
+    $0 --datafusion-install-method compile --datafusion-ref v49.0.0 full  # Compile specific version
 
 EOF
 }
@@ -46,6 +51,9 @@ parse_arguments() {
     VARIANTS=("${DATAFUSION_VARIANTS[@]}")
     INSTANCES=("${INSTANCE_TYPES[@]}")
     DATAFUSION_REF="main"
+    DATAFUSION_INSTALL_METHOD=""  # Will be set from config
+    CLICKBENCH_REPO=""  # Will be set from config
+    CLICKBENCH_REF=""  # Will be set from config
     ENABLE_NATIVE_OPTS=true
     RUN_ID="$(date +%Y%m%d-%H%M%S)"
     DRY_RUN=false
@@ -63,6 +71,18 @@ parse_arguments() {
                 ;;
             --datafusion-ref)
                 DATAFUSION_REF="$2"
+                shift 2
+                ;;
+            --datafusion-install-method)
+                DATAFUSION_INSTALL_METHOD="$2"
+                shift 2
+                ;;
+            --clickbench-repo)
+                CLICKBENCH_REPO="$2"
+                shift 2
+                ;;
+            --clickbench-ref)
+                CLICKBENCH_REF="$2"
                 shift 2
                 ;;
             --enable-native-opts)
@@ -141,11 +161,16 @@ import yaml
 with open('$PROJECT_DIR/config/aws-config.yml') as f:
     config = yaml.safe_load(f)
     aws = config.get('aws', {})
+    datafusion = config.get('datafusion', {})
+    clickbench = config.get('clickbench', {})
     print(f'export AWS_REGION={aws.get(\"region\", \"us-west-2\")}')
     print(f'export AWS_KEY_NAME={aws.get(\"key_name\", \"\")}')
     print(f'export AWS_PRIVATE_KEY_FILE={aws.get(\"private_key_file\", \"\")}')
     print(f'export AWS_SECURITY_GROUP={aws.get(\"security_group\", \"\")}')
     print(f'export AMI_ID={config.get(\"instances\", {}).get(\"ami_id\", \"ami-0c02fb55956c7d316\")}')
+    print(f'export CONFIG_DATAFUSION_INSTALL_METHOD={datafusion.get(\"install_method\", \"compile\")}')
+    print(f'export CONFIG_CLICKBENCH_REPO={clickbench.get(\"repository\", \"https://github.com/ClickHouse/ClickBench.git\")}')
+    print(f'export CONFIG_CLICKBENCH_REF={clickbench.get(\"default_ref\", \"main\")}')
 ")
     else
         echo "❌ Error: Configuration file not found"
@@ -161,12 +186,45 @@ with open('$PROJECT_DIR/config/aws-config.yml') as f:
     fi
 
     # Security group will be managed by Ansible playbooks
+
+    # Set DataFusion variables from config if not provided via command line
+    if [[ -z "$DATAFUSION_INSTALL_METHOD" ]]; then
+        DATAFUSION_INSTALL_METHOD="$CONFIG_DATAFUSION_INSTALL_METHOD"
+    fi
+
+    # If still empty, use default
+    if [[ -z "$DATAFUSION_INSTALL_METHOD" ]]; then
+        DATAFUSION_INSTALL_METHOD="compile"
+    fi
+
+    # Set ClickBench variables from config if not provided via command line
+    if [[ -z "$CLICKBENCH_REPO" ]]; then
+        CLICKBENCH_REPO="$CONFIG_CLICKBENCH_REPO"
+    fi
+
+    # If still empty, use default
+    if [[ -z "$CLICKBENCH_REPO" ]]; then
+        CLICKBENCH_REPO="https://github.com/ClickHouse/ClickBench.git"
+    fi
+
+    # Set ClickBench ref from config if not provided via command line
+    if [[ -z "$CLICKBENCH_REF" ]]; then
+        CLICKBENCH_REF="$CONFIG_CLICKBENCH_REF"
+    fi
+
+    # If still empty, use default
+    if [[ -z "$CLICKBENCH_REF" ]]; then
+        CLICKBENCH_REF="main"
+    fi
 }
 
 setup_instances() {
     echo "Setting up instances for variants: ${VARIANTS[*]}"
     echo "Instance types: ${INSTANCES[*]}"
     echo "DataFusion ref: $DATAFUSION_REF"
+    echo "DataFusion install method: $DATAFUSION_INSTALL_METHOD"
+    echo "ClickBench repo: $CLICKBENCH_REPO"
+    echo "ClickBench ref: $CLICKBENCH_REF"
     echo "Native optimizations: $ENABLE_NATIVE_OPTS"
     echo "Run ID: $RUN_ID"
 
@@ -200,7 +258,7 @@ setup_instances() {
     ansible-playbook -i "$PROJECT_DIR/ansible/inventory/aws_ec2.yml" \
         "$PROJECT_DIR/ansible/playbooks/setup-instance.yml" \
         --private-key "$AWS_PRIVATE_KEY_FILE" \
-        --extra-vars "datafusion_ref=$DATAFUSION_REF clickbench_repo=$CLICKBENCH_REPO enable_native_opts=$ENABLE_NATIVE_OPTS run_id=$RUN_ID"
+        --extra-vars "datafusion_ref=$DATAFUSION_REF datafusion_install_method=$DATAFUSION_INSTALL_METHOD clickbench_repo=$CLICKBENCH_REPO clickbench_ref=$CLICKBENCH_REF enable_native_opts=$ENABLE_NATIVE_OPTS run_id=$RUN_ID"
 }
 
 run_benchmarks() {
@@ -217,7 +275,7 @@ run_benchmarks() {
         if ! ansible-playbook -i "$PROJECT_DIR/ansible/inventory/aws_ec2.yml" \
             "$PROJECT_DIR/ansible/playbooks/run-datafusion.yml" \
             --private-key "$AWS_PRIVATE_KEY_FILE" \
-            --extra-vars "datafusion_variant=$variant datafusion_ref=$DATAFUSION_REF run_id=$RUN_ID"; then
+            --extra-vars "datafusion_variant=$variant datafusion_ref=$DATAFUSION_REF datafusion_install_method=$DATAFUSION_INSTALL_METHOD run_id=$RUN_ID"; then
             echo "❌ Error: Benchmark failed for variant $variant"
             exit 1
         else

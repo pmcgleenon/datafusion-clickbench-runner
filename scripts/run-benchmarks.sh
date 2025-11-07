@@ -167,7 +167,7 @@ with open('$PROJECT_DIR/config/aws-config.yml') as f:
     print(f'export AWS_KEY_NAME={aws.get(\"key_name\", \"\")}')
     print(f'export AWS_PRIVATE_KEY_FILE={aws.get(\"private_key_file\", \"\")}')
     print(f'export AWS_SECURITY_GROUP={aws.get(\"security_group\", \"\")}')
-    print(f'export AMI_ID={config.get(\"instances\", {}).get(\"ami_id\", \"ami-0c02fb55956c7d316\")}')
+    print(f'export AMI_ID={config.get(\"instances\", {}).get(\"ami_id\", \"ami-00f46ccd1cbfb363e\")}')
     print(f'export CONFIG_DATAFUSION_INSTALL_METHOD={datafusion.get(\"install_method\", \"compile\")}')
     print(f'export CONFIG_CLICKBENCH_REPO={clickbench.get(\"repository\", \"https://github.com/ClickHouse/ClickBench.git\")}')
     print(f'export CONFIG_CLICKBENCH_REF={clickbench.get(\"default_ref\", \"main\")}')

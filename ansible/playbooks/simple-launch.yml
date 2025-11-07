@@ -7,7 +7,7 @@
     ansible_python_interpreter: "{{ ansible_playbook_python }}"
     security_group_name: "datafusion-clickbench-sg"
     instance_types: "{{ instance_types | default(['c6a.2xlarge']) }}"
-    ami_id: "{{ ami_id | default('ami-08a5575b0450a0619') }}"
+    ami_id: "{{ ami_id | default('ami-00f46ccd1cbfb363e') }}"
     key_name: "{{ key_name }}"
     region: "{{ region | default('us-west-2') }}"
     run_id: "{{ run_id | default('unknown') }}"
@@ -120,8 +120,8 @@
     - name: Set AMI mapping based on architecture
       set_fact:
         ami_mapping:
-          x86_64: "ami-08a5575b0450a0619"  # Ubuntu 24.04 x86_64
-          arm64: "ami-057f91e02852c994a"   # Ubuntu 24.04 ARM64
+          x86_64: "ami-00f46ccd1cbfb363e"  # Ubuntu 24.04 x86_64
+          arm64: "ami-003954d35a6a87b23"   # Ubuntu 24.04 ARM64
 
     - name: Launch EC2 instances
       shell: |
@@ -133,7 +133,7 @@
           --instance-type "{{ item }}" \
           --key-name "{{ key_name }}" \
           --security-group-ids "{{ security_group_id }}" \
-          --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":500,"VolumeType":"gp3","DeleteOnTermination":true}}]' \
+          --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":500,"VolumeType":"gp2","DeleteOnTermination":true}}]' \
           --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=clickbench-datafusion-{{ item }}},{Key=Project,Value=datafusion-clickbench},{Key=AutoTerminate,Value=true},{Key=RunId,Value={{ run_id }}},{Key=InstanceType,Value={{ item }}},{Key=Architecture,Value='$arch'}]' \
           --query 'Instances[0].InstanceId' \
           --output text

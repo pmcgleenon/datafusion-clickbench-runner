@@ -14,7 +14,7 @@ aws:
 
 instances:
   # Ubuntu 24.04 LTS AMI ID for us-west-2 (latest as of 2025-09-25)
-  ami_id: ami-08a5575b0450a0619
+  ami_id: ami-00f46ccd1cbfb363e
 
 # DataFusion build configuration
 datafusion:

@@ -8,7 +8,7 @@
     security_group_name: "datafusion-clickbench-sg"
     security_group_description: "Security group for DataFusion ClickBench automation - SSH access only"
     instance_types: "{{ instance_types | default(['c6a.2xlarge']) }}"
-    ami_id: "{{ ami_id | default('ami-08a5575b0450a0619') }}"
+    ami_id: "{{ ami_id | default('ami-00f46ccd1cbfb363e') }}"
     key_name: "{{ key_name }}"
     region: "{{ region | default('us-west-2') }}"
     run_id: "{{ run_id | default('unknown') }}"

@@ -185,14 +185,21 @@
         # and ignore all the installation/compilation output
         grep '^\[.*\],$\|^\[.*\]$' "{{ results_file }}.raw" | sed 's/]$/],/' | sed '$s/,$//' > "{{ results_file }}.clean"
 
-        # Calculate data size safely
-        if [ "{{ datafusion_variant }}" = "datafusion-partitioned" ]; then
-          data_size=$(du -b partitioned/*.parquet 2>/dev/null | awk '{sum+=$1} END {print sum}' 2>/dev/null || echo 0)
-        else
-          data_size=$(stat -c%s hits.parquet 2>/dev/null || echo 0)
+        # Extract data size from benchmark output
+        # Format can be: "Data size: 14737666736	total" or "Data size: 14779976446  hits.parquet"
+        data_size=$(grep "^Data size:" "{{ results_file }}.raw" | awk '{print $3}' || echo 0)
+
+        # Ensure data_size is a valid number, fallback to file system calculation if needed
+        if ! [[ "$data_size" =~ ^[0-9]+$ ]] || [ "$data_size" = "0" ]; then
+          echo "Warning: Could not extract data size from benchmark output, trying file system calculation..."
+          if [ "{{ datafusion_variant }}" = "datafusion-partitioned" ]; then
+            data_size=$(du -b partitioned/*.parquet 2>/dev/null | awk '{sum+=$1} END {print sum}' 2>/dev/null || echo 0)
+          else
+            data_size=$(stat -c%s hits.parquet 2>/dev/null || echo 0)
+          fi
         fi
 
-        # Ensure data_size is a valid number
+        # Final validation - ensure data_size is a valid number
         if ! [[ "$data_size" =~ ^[0-9]+$ ]]; then
           data_size=0
         fi

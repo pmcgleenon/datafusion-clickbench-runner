@@ -24,6 +24,6 @@ jobs:
       - name: TruffleHog - Secrets Scan
         id: trufflehog
         if: always()
-        uses: trufflesecurity/trufflehog@v3.90.12 
+        uses: trufflesecurity/trufflehog@v3.90.13 
         with:
           extra_args: --results=verified,unknown
